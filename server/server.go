@@ -261,6 +261,9 @@ type Server struct {
 	// MQTT structure
 	mqtt srvMQTT
 
+	// Tailscale structure
+	tsnet *TailscaleServer
+
 	// OCSP monitoring
 	ocsps []*OCSPMonitor
 
@@ -1029,6 +1032,9 @@ func validateOptions(o *Options) error {
 		return err
 	}
 	if err := validateJetStreamOptions(o); err != nil {
+		return err
+	}
+	if err := validateTailscaleOptions(o); err != nil {
 		return err
 	}
 	// Finally check websocket options.
@@ -2336,6 +2342,12 @@ func (s *Server) Start() {
 		s.solicitLeafNodeRemotes(opts.LeafNode.Remotes)
 	}
 
+	// Start up a Tailscale listener if enabled
+	if opts.tailscaleEnabled() {
+		// nb: the tailscale libraries support using a context for cancellation, so if we had one here, we could plumb that through.
+		s.startTailscaleServer()
+	}
+
 	// TODO (ik): I wanted to refactor this by starting the client
 	// accept loop first, that is, it would resolve listen spec
 	// in place, but start the accept-for-loop in a different go
@@ -2505,6 +2517,13 @@ func (s *Server) Shutdown() {
 		doneExpected++
 		s.gatewayListener.Close()
 		s.gatewayListener = nil
+	}
+
+	// Kick TSNet AcceptLoop()
+	if s.tsnet != nil {
+		doneExpected++
+		s.tsnet.NATSListener.Close()
+		s.tsnet = nil
 	}
 
 	// Kick HTTP monitoring if its running

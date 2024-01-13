@@ -245,6 +245,34 @@ type AuthCallout struct {
 	XKey string
 }
 
+// TSNetOpts are Tailscale Network Options
+type TSNetOpts struct {
+	// Name is the "machine name" to present on the net
+	// This will be the first component of the hostname, so {Name}.{YourTSNetCodeWordsName}.ts.net
+	Name string `json:"name"`
+	// NATSPort is for a normal client connect port and overrides the global
+	// "Port" option.
+	NATSPort int `json:"nats_port"`
+	// We don't need TLS with Tailscale, but if this is set true we'll get a cert
+	// and allow the user to enable it.
+	AllowTLS bool `json:"allow_tls"`
+	// QuietLogs suppresses the tailscale logs
+	QuietLogs bool `json:"quiet_logs"`
+
+	// TBD: websockets port?  Stats/metrics Port?
+
+	// I've not used this but it's exposed as an option and I know some folks use their own
+	// third-party coordination servers, so let's plumb it through.
+	ControlURL string `json:"control_url"`
+
+	// Put all authenticated users into the $G global account
+	UseGlobalNATSAccount bool `json:"use_global_nats_account"`
+	// Put all authenticated users into this named account
+	UseNATSAccount string `json:"use_nats_account"`
+	// Map the user identifier into a user, for use in authorization blocks
+	MapUsers bool `json:"map_users"`
+}
+
 // Options block for nats-server.
 // NOTE: This structure is no longer used for monitoring endpoints
 // and json tags are deprecated and may be removed in the future.
@@ -409,6 +437,9 @@ type Options struct {
 
 	// OCSP Cache config enables next-gen cache for OCSP features
 	OCSPCacheConfig *OCSPResponseCacheConfig
+
+	// Tailscale config enables a tsnet listener with a client port on it
+	Tailscale *TSNetOpts `json:"tailscale"`
 
 	// Used to mark that we had a top level authorization block.
 	authBlockDefined bool
@@ -616,6 +647,10 @@ func (o *Options) Clone() *Options {
 		for i, g := range o.Gateway.Gateways {
 			clone.Gateway.Gateways[i] = g.clone()
 		}
+	}
+	if o.Tailscale != nil {
+		clone.Tailscale = &TSNetOpts{}
+		*clone.Tailscale = *o.Tailscale
 	}
 	// FIXME(dlc) - clone leaf node stuff.
 	return clone
@@ -1545,6 +1580,12 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 			err = &configErr{tk, fmt.Sprintf("error parsing tags: unsupported type %T", v)}
 		}
 		if err != nil {
+			*errors = append(*errors, err)
+			return
+		}
+	case "tailscale":
+		if err := parseTailscale(v, o, errors, warnings); err != nil {
+			err := &configErr{tk, err.Error()}
 			*errors = append(*errors, err)
 			return
 		}
@@ -4616,6 +4657,55 @@ func parseWebsocket(v interface{}, o *Options, errors *[]error, warnings *[]erro
 			o.Websocket.JWTCookie = mv.(string)
 		case "no_auth_user":
 			o.Websocket.NoAuthUser = mv.(string)
+		default:
+			if !tk.IsUsedVariable() {
+				err := &unknownConfigFieldErr{
+					field: mk,
+					configErr: configErr{
+						token: tk,
+					},
+				}
+				*errors = append(*errors, err)
+				continue
+			}
+		}
+	}
+	return nil
+}
+
+func parseTailscale(v interface{}, o *Options, errors *[]error, warnings *[]error) error {
+	var lt token
+	defer convertPanicToErrorList(&lt, errors)
+
+	tk, v := unwrapValue(v, &lt)
+	gm, ok := v.(map[string]interface{})
+	if !ok {
+		return &configErr{tk, fmt.Sprintf("Expected tailscale to be a map, got %T", v)}
+	}
+	o.Tailscale = &TSNetOpts{}
+	for mk, mv := range gm {
+		// Again, unwrap token value if line check is required.
+		tk, mv = unwrapValue(mv, &lt)
+		switch strings.ToLower(mk) {
+		case "nats_port", "port":
+			o.Tailscale.NATSPort = int(mv.(int64))
+		case "name":
+			o.Tailscale.Name = mv.(string)
+		case "control_url", "coordination_url":
+			o.Tailscale.ControlURL = mv.(string)
+		case "quiet_logs":
+			o.Tailscale.QuietLogs = mv.(bool)
+		case "use_global_nats_account", "in_global":
+			o.Tailscale.UseGlobalNATSAccount = mv.(bool)
+		case "map_users", "verify_and_map":
+			o.Tailscale.MapUsers = mv.(bool)
+		case "use_nats_account":
+			o.Tailscale.UseNATSAccount = mv.(string)
+		case "allow_tls":
+			// don't accept "tls" here, leave that for a full options block
+			// because changing the semantics in one part of the config file
+			// would be too confusing.
+			o.Tailscale.AllowTLS = mv.(bool)
 		default:
 			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
