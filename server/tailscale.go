@@ -258,6 +258,10 @@ func (s *Server) createTailscaleClient(conn net.Conn, tsnet *TailscaleServer) *c
 
 	deferAccountUntilLogin := false
 
+	c.mu.Lock()
+
+	c.initClient()
+
 	if tsnet.Options.UseGlobalNATSAccount {
 		c.registerWithAccount(s.globalAccount())
 		s.Debugf("tailscale->account: %q placed in global account", tsAuthIdentifier)
@@ -265,6 +269,7 @@ func (s *Server) createTailscaleClient(conn net.Conn, tsnet *TailscaleServer) *c
 		acc, err := s.lookupAccount(tsnet.Options.UseNATSAccount)
 		if err != nil {
 			s.Errorf("tailscale configured NATS account lookup failed when trying to connect %q: %w", tsAuthIdentifier, err)
+			c.mu.Unlock()
 			c.sendErr(fmt.Sprintf("server misconfiguration connecting you to account, sorry %q", tsAuthIdentifier))
 			c.closeConnection(MissingAccount)
 			return nil
@@ -275,6 +280,7 @@ func (s *Server) createTailscaleClient(conn net.Conn, tsnet *TailscaleServer) *c
 		user, ok := s.users[tsAuthIdentifier]
 		if !ok {
 			s.Debugf("tailscale->account: user %q not tied to any account when MapUsers", tsAuthIdentifier)
+			c.mu.Unlock()
 			c.sendErr(fmt.Sprintf("Sorry %q, no account grants you access", tsAuthIdentifier))
 			c.closeConnection(AuthenticationViolation)
 			return nil
@@ -295,6 +301,7 @@ func (s *Server) createTailscaleClient(conn net.Conn, tsnet *TailscaleServer) *c
 		} else {
 			if !c.connectionTypeAllowed(user.AllowedConnectionTypes) {
 				s.Debugf("tailscale->account: tsuser %q nats-user %q connection type not allowed", tsAuthIdentifier, user.Username)
+				c.mu.Unlock()
 				c.sendErr("connection type not allowed for your user") // XXX is this compliant with disclosure policy?
 				c.closeConnection(AuthenticationViolation)             // Is this the correct ClosedState?
 				return nil
@@ -304,15 +311,13 @@ func (s *Server) createTailscaleClient(conn net.Conn, tsnet *TailscaleServer) *c
 			} else {
 				s.Debugf("tailscale->account: tsuser %q -> nats-user %q without account", tsAuthIdentifier, user.Username)
 			}
+			c.mu.Unlock()
 			c.RegisterUser(user)
+			c.mu.Lock()
 		}
 	} else {
 		s.Fatalf("BUG: unknown user->account disposition for tailscale connections")
 	}
-
-	c.mu.Lock()
-
-	c.initClient()
 
 	// I'm tempted to just not enable TLS, because the heuristics used to try
 	// to handle automatic TLS-first-or-not seem unlikely to work well with a
