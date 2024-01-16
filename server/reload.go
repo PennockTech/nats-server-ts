@@ -1163,6 +1163,7 @@ func imposeOrder(value interface{}) error {
 		*OCSPConfig, map[string]string, JSLimitOpts, StoreCipher, *OCSPResponseCacheConfig:
 		// explicitly skipped types
 	case *AuthCallout:
+	case *TSNetOpts:
 	default:
 		// this will fail during unit tests
 		return fmt.Errorf("OnReload, sort or explicitly skip type: %s",
@@ -1631,6 +1632,13 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			if new != old {
 				diffOpts = append(diffOpts, &profBlockRateReload{newValue: new})
 			}
+		// TODO(TAILSCALE)
+		// case "tailscale":
+		// Can't change name or control_url or nats_port or quiet_logs (I don't think)
+		// I think could change:
+		//    bools:  use_global_nats_account, map_users
+		//    string: use_nats_account
+		// but would need to validate only one of those three set afterwards
 		default:
 			// TODO(ik): Implement String() on those options to have a nice print.
 			// %v is difficult to figure what's what, %+v print private fields and
