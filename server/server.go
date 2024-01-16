@@ -153,7 +153,7 @@ type Server struct {
 	accAddedCh          chan struct{}
 	accAddedReqID       string
 	leafs               map[uint64]*client
-	users               map[string]*User
+	users               map[string]*User // Note this is now a linked-list
 	nkeys               map[string]*NkeyUser
 	totalClients        uint64
 	closed              *closedRingBuffer

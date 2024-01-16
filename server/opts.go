@@ -1,4 +1,4 @@
-// Copyright 2012-2023 The NATS Authors
+// Copyright 2012-2024 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -988,12 +988,19 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 			// users that may have been configured in parseAccounts().
 			if len(auth.users) > 0 {
 				for _, u := range auth.users {
-					if _, ok := unames[u.Username]; ok {
-						err := &configErr{tk, fmt.Sprintf("Duplicate user %q detected", u.Username)}
-						*errors = append(*errors, err)
-						return
+					var (
+						entry *userDupInfo
+						ok    bool
+					)
+					if entry, ok = unames[u.Username]; !ok {
+						entry = &userDupInfo{}
 					}
-					unames[u.Username] = struct{}{}
+					entry.add(tk, u.IsDefault)
+					unames[u.Username] = entry
+				}
+				if err := unames.auditDupDefaults(); err != nil {
+					*errors = append(*errors, err)
+					return
 				}
 				// Users may have been added from Accounts parsing, so do an append here
 				o.Users = append(o.Users, auth.users...)
@@ -1002,12 +1009,13 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 		// Check for nkeys
 		if len(auth.nkeys) > 0 {
 			for _, u := range auth.nkeys {
+				// PDP-FIXME _perhaps_ but probably okay as-is?
 				if _, ok := unames[u.Nkey]; ok {
 					err := &configErr{tk, fmt.Sprintf("Duplicate nkey %q detected", u.Nkey)}
 					*errors = append(*errors, err)
 					return
 				}
-				unames[u.Nkey] = struct{}{}
+				unames[u.Nkey] = &userDupInfo{}
 			}
 			// NKeys may have been added from Accounts parsing, so do an append here
 			o.Nkeys = append(o.Nkeys, auth.nkeys...)
@@ -1602,13 +1610,86 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 	}
 }
 
-func setupUsersAndNKeysDuplicateCheckMap(o *Options) map[string]struct{} {
-	unames := make(map[string]struct{}, len(o.Users)+len(o.Nkeys))
+type userDupInfo struct {
+	seenCount   int
+	seenDefault int
+	// Only some paths let us record these; we store it because tk records the
+	// line number, for better diagnostics.
+	// My assumption is all references to these objects will be gone after
+	// config parsing, so it's a small hit to memory during config parse and
+	// only then.
+	partialTk        []token
+	partialDefaultTk []token
+}
+
+type userDupInfoCollection map[string]*userDupInfo
+
+func (di *userDupInfo) add(tk token, isDefault bool) {
+	di.partialTk = append(di.partialTk, tk)
+	di.seenCount += 1
+	if isDefault {
+		di.seenDefault += 1
+		di.partialDefaultTk = append(di.partialDefaultTk, tk)
+	}
+}
+
+func (dc userDupInfoCollection) auditDupDefaults() error {
+	// TODO: This would be a good place to use a multi-error to return multiple conflicts at once.
+	for username, dupInfo := range dc {
+		if dupInfo.seenCount == 1 || dupInfo.seenDefault == 1 {
+			continue
+		}
+		var (
+			template string
+			err      error
+		)
+		if dupInfo.seenDefault == 0 {
+			if dupInfo.seenCount == len(dupInfo.partialTk) {
+				template = "duplicated user %q occurs %d times, but none marked default"
+			} else {
+				template = "duplicated user %q occurs %d times, but none marked default, partial list"
+			}
+			err = &configMultiLocationErr{
+				reason: fmt.Sprintf(template, username, dupInfo.seenCount),
+				tokens: dupInfo.partialTk,
+			}
+		} else {
+			if dupInfo.seenDefault == len(dupInfo.partialDefaultTk) {
+				template = "duplicated user %q occurs %d times, %d of which were marked default"
+			} else {
+				template = "duplicated user %q occurs %d times, %d of which were marked default, partial list"
+			}
+			err = &configMultiLocationErr{
+				reason: fmt.Sprintf(template, username, dupInfo.seenCount, dupInfo.seenDefault),
+				tokens: dupInfo.partialDefaultTk,
+			}
+		}
+		return err
+	}
+	return nil
+}
+
+func setupUsersAndNKeysDuplicateCheckMap(o *Options) userDupInfoCollection {
+	// We never set partialTk here, we don't have the information
+	unames := make(userDupInfoCollection, len(o.Users)+len(o.Nkeys))
+	incr := func(name string, isDefault bool) {
+		var entry *userDupInfo
+		if existing, ok := unames[name]; ok {
+			entry = existing
+			entry.seenCount += 1
+		} else {
+			entry = &userDupInfo{seenCount: 1}
+		}
+		if isDefault {
+			entry.seenCount += 1
+		}
+		unames[name] = entry
+	}
 	for _, u := range o.Users {
-		unames[u.Username] = struct{}{}
+		incr(u.Username, u.IsDefault)
 	}
 	for _, u := range o.Nkeys {
-		unames[u.Nkey] = struct{}{}
+		unames[u.Nkey] = &userDupInfo{seenCount: 1}
 	}
 	return unames
 }
@@ -3084,22 +3165,29 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 			applyDefaultPermissions(users, nkeyUsr, acc.defaultPerms)
 			for _, u := range nkeyUsr {
 				if _, ok := uorn[u.Nkey]; ok {
+					// Multi-user-if-default: leave this as-is, we don't want duplicate nkey logins at this time.
 					err := &configErr{usersTk, fmt.Sprintf("Duplicate nkey %q detected", u.Nkey)}
 					*errors = append(*errors, err)
 					continue
 				}
-				uorn[u.Nkey] = struct{}{}
+				uorn[u.Nkey] = &userDupInfo{}
 				u.Account = acc
 			}
 			opts.Nkeys = append(opts.Nkeys, nkeyUsr...)
+			var (
+				entry *userDupInfo
+			)
+
 			for _, u := range users {
-				if _, ok := uorn[u.Username]; ok {
-					err := &configErr{usersTk, fmt.Sprintf("Duplicate user %q detected", u.Username)}
-					*errors = append(*errors, err)
-					continue
+				if entry, ok = uorn[u.Username]; !ok {
+					entry = &userDupInfo{}
 				}
-				uorn[u.Username] = struct{}{}
+				entry.add(tk, u.IsDefault)
+				uorn[u.Username] = entry
 				u.Account = acc
+			}
+			if err := uorn.auditDupDefaults(); err != nil {
+				*errors = append(*errors, err)
 			}
 			opts.Users = append(opts.Users, users...)
 		}
@@ -3853,6 +3941,8 @@ func parseUsers(mv interface{}, opts *Options, errors *[]error, warnings *[]erro
 				user.Username = v.(string)
 			case "pass", "password":
 				user.Password = v.(string)
+			case "default":
+				user.IsDefault = v.(bool)
 			case "permission", "permissions", "authorization":
 				perms, err = parseUserPermissions(tk, errors, warnings)
 				if err != nil {

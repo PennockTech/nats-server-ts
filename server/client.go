@@ -261,7 +261,8 @@ type client struct {
 	last       time.Time
 	lastIn     time.Time
 
-	headers bool
+	headers            bool
+	userLoginIsAccount *User
 
 	rtt      time.Duration
 	rttStart time.Time

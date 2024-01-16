@@ -16,6 +16,7 @@ package server
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 var (
@@ -255,6 +256,39 @@ func (e *configErr) Error() string {
 		return fmt.Sprintf("%s: %s", e.Source(), e.reason)
 	}
 	return e.reason
+}
+
+// configMultiLocationErr is a configuration error where we have multiple
+// locations which combine to cause it
+type configMultiLocationErr struct {
+	tokens []token
+	reason string
+}
+
+// Sources reports the locations of a configuration error.
+func (e *configMultiLocationErr) Sources() []string {
+	l := make([]string, len(e.tokens))
+	for i := range e.tokens {
+		l[i] = fmt.Sprintf("%s:%d:%d", e.tokens[i].SourceFile(), e.tokens[i].Line(), e.tokens[i].Position())
+	}
+	return l
+}
+
+func (e *configMultiLocationErr) Error() string {
+	if len(e.tokens) == 0 {
+		return e.reason
+	}
+	sources := e.Sources()
+	b := strings.Builder{}
+	b.WriteString(e.reason)
+	b.WriteString(" at [")
+	b.WriteString(sources[0])
+	for i := 1; i < len(sources); i += 1 {
+		b.WriteString(", ")
+		b.WriteString(sources[i])
+	}
+	b.WriteString("]")
+	return b.String()
 }
 
 // unknownConfigFieldErr is an error reported in pedantic mode.

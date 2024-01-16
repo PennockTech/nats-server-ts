@@ -256,6 +256,8 @@ func (s *Server) createTailscaleClient(conn net.Conn, tsnet *TailscaleServer) *c
 	info.TLSRequired = false
 	info.TLSAvailable = tsnet.Options.AllowTLS
 
+	deferAccountUntilLogin := false
+
 	if tsnet.Options.UseGlobalNATSAccount {
 		c.registerWithAccount(s.globalAccount())
 		s.Debugf("tailscale->account: %q placed in global account", tsAuthIdentifier)
@@ -277,18 +279,33 @@ func (s *Server) createTailscaleClient(conn net.Conn, tsnet *TailscaleServer) *c
 			c.closeConnection(AuthenticationViolation)
 			return nil
 		}
-		if !c.connectionTypeAllowed(user.AllowedConnectionTypes) {
-			s.Debugf("tailscale->account: tsuser %q nats-user %q connection type not allowed", tsAuthIdentifier, user.Username)
-			c.sendErr("connection type not allowed for your user") // XXX is this compliant with disclosure policy?
-			c.closeConnection(AuthenticationViolation)             // Is this the correct ClosedState?
-			return nil
-		}
-		if user.Account != nil {
-			s.Debugf("tailscale->account: tsuser %q -> nats-user %q in account %q", tsAuthIdentifier, user.Username, user.Account.Name)
+		if user.nextInChain != nil {
+			c.userLoginIsAccount = user
+			info.AuthRequired = true
+			s.Debugf("tailscale->account: tsuser %q has multiple accounts to choose from, deferring login", tsAuthIdentifier)
+			// The rest of this is purely for debugging and perhaps excessive
+			for user != nil {
+				if user.Account != nil {
+					s.Debugf("tailcale->account: candidate: tsuser %q -> nats-user %q in account %q", tsAuthIdentifier, user.Username, user.Account.Name)
+				} else {
+					s.Debugf("tailcale->account: candidate: tsuser %q -> nats-user %q without account", tsAuthIdentifier, user.Username)
+				}
+				user = user.nextInChain
+			}
 		} else {
-			s.Debugf("tailscale->account: tsuser %q -> nats-user %q without account", tsAuthIdentifier, user.Username)
+			if !c.connectionTypeAllowed(user.AllowedConnectionTypes) {
+				s.Debugf("tailscale->account: tsuser %q nats-user %q connection type not allowed", tsAuthIdentifier, user.Username)
+				c.sendErr("connection type not allowed for your user") // XXX is this compliant with disclosure policy?
+				c.closeConnection(AuthenticationViolation)             // Is this the correct ClosedState?
+				return nil
+			}
+			if user.Account != nil {
+				s.Debugf("tailscale->account: tsuser %q -> nats-user %q in account %q", tsAuthIdentifier, user.Username, user.Account.Name)
+			} else {
+				s.Debugf("tailscale->account: tsuser %q -> nats-user %q without account", tsAuthIdentifier, user.Username)
+			}
+			c.RegisterUser(user)
 		}
-		c.RegisterUser(user)
 	} else {
 		s.Fatalf("BUG: unknown user->account disposition for tailscale connections")
 	}
@@ -307,6 +324,14 @@ func (s *Server) createTailscaleClient(conn net.Conn, tsnet *TailscaleServer) *c
 	// mandatory TLS world.
 
 	c.sendProtoNow(c.generateClientInfoJSON(info))
+
+	if deferAccountUntilLogin {
+		// This is what the regular flow does: global account until auth done.
+		// TODO: explain here why
+		c.registerWithAccount(s.globalAccount())
+
+		c.setAuthTimer(secondsToDuration(opts.AuthTimeout))
+	}
 
 	c.mu.Unlock()
 

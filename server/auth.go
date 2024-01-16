@@ -69,10 +69,12 @@ type NkeyUser struct {
 type User struct {
 	Username               string              `json:"user"`
 	Password               string              `json:"password"`
+	IsDefault              bool                `json:"default"`
 	Permissions            *Permissions        `json:"permissions,omitempty"`
 	Account                *Account            `json:"account,omitempty"`
 	ConnectionDeadline     time.Time           `json:"connection_deadline,omitempty"`
 	AllowedConnectionTypes map[string]struct{} `json:"connection_types,omitempty"`
+	nextInChain            *User
 }
 
 // clone performs a deep copy of the User struct, returning a new clone with
@@ -338,7 +340,28 @@ func (s *Server) buildNkeysAndUsersFromOptions(nko []*NkeyUser, uo []*User) (map
 			if copy.Permissions != nil {
 				validateResponsePermissions(copy.Permissions)
 			}
-			users[u.Username] = copy
+			// We know from parse-time checks that only one user can have been marked as default.
+			// Let's keep the default at the head of the list.
+			// This means that login methods which don't support account selection will just
+			// grab the default entry and log the user into that.
+			//
+			// We expect these linked-lists to be at most 2 or 3 entries long.
+			// If one user appears in thousands of accounts, we will need to
+			// revisit why someone needs that and the performance implications
+			// at login time for finding the correct one.
+			if existing, ok := users[u.Username]; ok {
+				if copy.IsDefault {
+					copy.nextInChain = existing
+					users[u.Username] = copy
+				} else {
+					for existing.nextInChain != nil {
+						existing = existing.nextInChain
+					}
+					existing.nextInChain = copy
+				}
+			} else {
+				users[u.Username] = copy
+			}
 		}
 	}
 	s.assignGlobalAccountToOrphanUsers(nkeys, users)
@@ -815,6 +838,7 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) (au
 				s.mu.Unlock()
 				return false
 			}
+			// PDP-FIXME: here is where we'd implement multi-account-users for TLS verify_and_map
 			if c.opts.Username != _EMPTY_ {
 				s.Warnf("User %q found in connect proto, but user required from cert", c.opts.Username)
 			}
@@ -832,6 +856,31 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) (au
 				}
 			}
 			if c.opts.Username != _EMPTY_ {
+				if c.userLoginIsAccount != nil {
+					// This is currently Tailscale only.
+					// Authentication has already happened.
+					// Rather than update the client protocol with a new
+					// account field, we're "borrowing" the user identifier as
+					// an Account identifier.
+					// NB/FIXME: if there's no account identifier, what does that actually mean?
+					for user = c.userLoginIsAccount; user != nil; user = user.nextInChain {
+						if user.Account == nil {
+							continue
+						}
+						// We're already authenticated, I don't think we need to handle timing-sensitive comparisons here.
+						if c.opts.Username == user.Account.Name {
+							// Authorized
+							s.Debugf("User %q pre-authenticated and chose authorization identifier %q", c.userLoginIsAccount.Username, c.opts.Username)
+							s.mu.Unlock()
+							c.RegisterUser(user)
+							return true
+						}
+					}
+					// Unauthorized
+					s.Warnf("User %q pre-authenticated but requested authorization identifier they are not granted: %q", c.userLoginIsAccount.Username, c.opts.Username)
+					s.mu.Unlock()
+					return false
+				}
 				user, ok = s.users[c.opts.Username]
 				if !ok || !c.connectionTypeAllowed(user.AllowedConnectionTypes) {
 					s.mu.Unlock()

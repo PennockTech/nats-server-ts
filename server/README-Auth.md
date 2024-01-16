@@ -95,3 +95,11 @@ allow for rate-limiting connection attempts from naive users.
 Or even making the back-off be capped-exponential.
 
 
+## Current Status
+
+A loose implementation has been written for handling one user appearing
+multiple times, covering steps 1 and 2.  Tests have not yet been written,
+as ... I got too tired on the holiday weekend and only got back to this late.
+At least I have a plan for how to write tests for this one.
+
+Implementation using user selection has been implemented for Tailscale.
