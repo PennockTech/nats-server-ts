@@ -261,7 +261,9 @@ type client struct {
 	last       time.Time
 	lastIn     time.Time
 
-	headers            bool
+	headers bool
+
+	preauthenticated   bool
 	userLoginIsAccount *User
 
 	rtt      time.Duration
@@ -1960,6 +1962,12 @@ func (c *client) processConnect(arg []byte) error {
 	kind := c.kind
 	srv := c.srv
 
+	if c.userLoginIsAccount != nil {
+		// We're about to unmarshal the client's request in, we want to make
+		// sure we're acting based upon what the client sent us, not existing
+		// auth identifiers such as from Tailscale.
+		c.opts.Username = ""
+	}
 	// Moved unmarshalling of clients' Options under the lock.
 	// The client has already been added to the server map, so it is possible
 	// that other routines lookup the client, and access its options under

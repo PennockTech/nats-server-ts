@@ -244,7 +244,11 @@ func (s *Server) createTailscaleClient(conn net.Conn, tsnet *TailscaleServer) *c
 	now := time.Now()
 
 	c := &client{srv: s, nc: conn, opts: defaultOpts, mpay: maxPay, msubs: maxSubs, start: now, last: now}
+	// If we do a c.RegisterUser() below then that will also set tsAuthIdentifier.
+	// That's only for the MapUsers case.  For the registerWithAccount case, we want the identifier here.
+	// To enable login multi-account, we have to explicitly handle nextInChain to override the username being set already at CONNECT time.
 	c.opts.Username = tsAuthIdentifier
+	c.preauthenticated = true
 
 	s.mu.Lock()
 	info := s.copyInfo()
@@ -256,14 +260,15 @@ func (s *Server) createTailscaleClient(conn net.Conn, tsnet *TailscaleServer) *c
 	info.TLSRequired = false
 	info.TLSAvailable = tsnet.Options.AllowTLS
 
-	deferAccountUntilLogin := false
-
 	c.mu.Lock()
-
 	c.initClient()
+	c.mu.Unlock()
+
+	registered := false
 
 	if tsnet.Options.UseGlobalNATSAccount {
 		c.registerWithAccount(s.globalAccount())
+		registered = true
 		s.Debugf("tailscale->account: %q placed in global account", tsAuthIdentifier)
 	} else if tsnet.Options.UseNATSAccount != "" {
 		acc, err := s.lookupAccount(tsnet.Options.UseNATSAccount)
@@ -276,6 +281,7 @@ func (s *Server) createTailscaleClient(conn net.Conn, tsnet *TailscaleServer) *c
 		}
 		s.Debugf("tailscale->account: %q placed in account %q", tsAuthIdentifier, acc.Name)
 		c.registerWithAccount(acc)
+		registered = true
 	} else if tsnet.Options.MapUsers {
 		user, ok := s.users[tsAuthIdentifier]
 		if !ok {
@@ -287,34 +293,34 @@ func (s *Server) createTailscaleClient(conn net.Conn, tsnet *TailscaleServer) *c
 		}
 		if user.nextInChain != nil {
 			c.userLoginIsAccount = user
-			info.AuthRequired = true
-			s.Debugf("tailscale->account: tsuser %q has multiple accounts to choose from, deferring login", tsAuthIdentifier)
+			dbgUser := user
+			// We have a default user, we'll set that.  The user can log in without creds as that default user.
+			// If we drop the requirement for at least one account to be marked default, then move the login
+			// into an else-block to our current if-block and set: info.AuthRequired = true
+			s.Debugf("tailscale->account: tsuser %q has multiple accounts to choose from:", tsAuthIdentifier)
 			// The rest of this is purely for debugging and perhaps excessive
-			for user != nil {
-				if user.Account != nil {
-					s.Debugf("tailcale->account: candidate: tsuser %q -> nats-user %q in account %q", tsAuthIdentifier, user.Username, user.Account.Name)
+			for dbgUser != nil {
+				if dbgUser.Account != nil {
+					s.Debugf("tailscale->account: (candidate: tsuser %q -> nats-user %q in account %q)", tsAuthIdentifier, dbgUser.Username, dbgUser.Account.Name)
 				} else {
-					s.Debugf("tailcale->account: candidate: tsuser %q -> nats-user %q without account", tsAuthIdentifier, user.Username)
+					s.Debugf("tailscale->account: (candidate: tsuser %q -> nats-user %q without account)", tsAuthIdentifier, dbgUser.Username)
 				}
-				user = user.nextInChain
+				dbgUser = dbgUser.nextInChain
 			}
-		} else {
-			if !c.connectionTypeAllowed(user.AllowedConnectionTypes) {
-				s.Debugf("tailscale->account: tsuser %q nats-user %q connection type not allowed", tsAuthIdentifier, user.Username)
-				c.mu.Unlock()
-				c.sendErr("connection type not allowed for your user") // XXX is this compliant with disclosure policy?
-				c.closeConnection(AuthenticationViolation)             // Is this the correct ClosedState?
-				return nil
-			}
-			if user.Account != nil {
-				s.Debugf("tailscale->account: tsuser %q -> nats-user %q in account %q", tsAuthIdentifier, user.Username, user.Account.Name)
-			} else {
-				s.Debugf("tailscale->account: tsuser %q -> nats-user %q without account", tsAuthIdentifier, user.Username)
-			}
-			c.mu.Unlock()
-			c.RegisterUser(user)
-			c.mu.Lock()
 		}
+		if !c.connectionTypeAllowed(user.AllowedConnectionTypes) {
+			s.Debugf("tailscale->account: tsuser %q nats-user %q connection type not allowed", tsAuthIdentifier, user.Username)
+			c.sendErr("connection type not allowed for your user") // XXX is this compliant with disclosure policy?
+			c.closeConnection(AuthenticationViolation)             // Is this the correct ClosedState?
+			return nil
+		}
+		if user.Account != nil {
+			s.Debugf("tailscale->account: tsuser %q logged into nats-user %q in account %q", tsAuthIdentifier, user.Username, user.Account.Name)
+		} else {
+			s.Debugf("tailscale->account: tsuser %q logged into nats-user %q without account", tsAuthIdentifier, user.Username)
+		}
+		c.RegisterUser(user)
+		registered = true
 	} else {
 		s.Fatalf("BUG: unknown user->account disposition for tailscale connections")
 	}
@@ -328,12 +334,18 @@ func (s *Server) createTailscaleClient(conn net.Conn, tsnet *TailscaleServer) *c
 	// ... we don't _need_ TLS and forced-TLS-first is more geared for a
 	// mandatory TLS world.
 
+	c.mu.Lock()
+
 	c.sendProtoNow(c.generateClientInfoJSON(info))
 
-	if deferAccountUntilLogin {
+	if c.userLoginIsAccount != nil {
 		// This is what the regular flow does: global account until auth done.
 		// TODO: explain here why
-		c.registerWithAccount(s.globalAccount())
+		if !registered {
+			c.mu.Unlock()
+			c.registerWithAccount(s.globalAccount())
+			c.mu.Lock()
+		}
 
 		c.setAuthTimer(secondsToDuration(opts.AuthTimeout))
 	}
@@ -364,6 +376,8 @@ func (s *Server) createTailscaleClient(conn net.Conn, tsnet *TailscaleServer) *c
 
 	c.mu.Lock()
 	// FIXME TLS HERE
+	// Can get the certs from Tailscale with:
+	//   &tls.Config{GetCertificate: tsnet.LocalClient.GetCertificate}
 
 	if c.isClosed() {
 		c.mu.Unlock()
@@ -390,15 +404,3 @@ func (s *Server) createTailscaleClient(conn net.Conn, tsnet *TailscaleServer) *c
 
 	return c
 }
-
-/*
-        if *addr == ":443" {
-                ln = tls.NewListener(ln, &tls.Config{
-                        GetCertificate: lc.GetCertificate,
-                })
-        }
-
-	_ = &tls.Config{GetCertificate: tsnet.LocalClient.GetCertificate}
-MapUsers
-
-*/

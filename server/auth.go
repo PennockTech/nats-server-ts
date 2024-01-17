@@ -855,36 +855,62 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) (au
 					c.mu.Unlock()
 				}
 			}
-			if c.opts.Username != _EMPTY_ {
-				if c.userLoginIsAccount != nil {
-					// This is currently Tailscale only.
-					// Authentication has already happened.
-					// Rather than update the client protocol with a new
-					// account field, we're "borrowing" the user identifier as
-					// an Account identifier.
-					// NB/FIXME: if there's no account identifier, what does that actually mean?
-					for user = c.userLoginIsAccount; user != nil; user = user.nextInChain {
-						if user.Account == nil {
-							continue
-						}
-						// We're already authenticated, I don't think we need to handle timing-sensitive comparisons here.
-						if c.opts.Username == user.Account.Name {
-							// Authorized
-							s.Debugf("User %q pre-authenticated and chose authorization identifier %q", c.userLoginIsAccount.Username, c.opts.Username)
-							s.mu.Unlock()
-							c.RegisterUser(user)
-							return true
-						}
-					}
-					// Unauthorized
-					s.Warnf("User %q pre-authenticated but requested authorization identifier they are not granted: %q", c.userLoginIsAccount.Username, c.opts.Username)
-					s.mu.Unlock()
-					return false
+
+			if c.userLoginIsAccount != nil {
+				// This is currently Tailscale only.
+				// Authentication has already happened.
+				// Rather than update the client protocol with a new
+				// account field, we're "borrowing" the user identifier as
+				// an Account identifier.
+				// NB/FIXME: if there's no account identifier in a user object, what are the semantics of that?
+				requestedId := c.opts.Username
+				logId := c.userLoginIsAccount.Username
+				if c.opts.Username == _EMPTY_ && c.opts.Token != _EMPTY_ {
+					// Some clients say "oh, you didn't give a password, we're sending the user as the token instead".
+					requestedId = c.opts.Token
 				}
-				user, ok = s.users[c.opts.Username]
-				if !ok || !c.connectionTypeAllowed(user.AllowedConnectionTypes) {
-					s.mu.Unlock()
-					return false
+				for user = c.userLoginIsAccount; user != nil; user = user.nextInChain {
+					if user.Account == nil {
+						continue
+					}
+					useThis := false
+					// We're already authenticated, I don't think we need to handle timing-sensitive comparisons here.
+					if requestedId == "" && user.IsDefault {
+						s.Debugf("User %q pre-authenticated and chose no identifier, using default account %q", logId, user.Account.Name)
+						useThis = true
+					}
+					if requestedId == user.Account.Name {
+						// Authorized
+						s.Debugf("User %q pre-authenticated and chose authorization identifier (account) %q", logId, requestedId)
+						useThis = true
+					}
+					if useThis {
+						s.mu.Unlock()
+						c.RegisterUser(user)
+						return true
+					}
+				}
+				// Unauthorized
+				s.Warnf("User %q pre-authenticated but requested authorization identifier they are not granted: %q", logId, requestedId)
+				s.mu.Unlock()
+				return false
+			}
+
+			if c.preauthenticated {
+				if c.opts.Username != _EMPTY_ {
+					s.Debugf("User %q pre-authenticated and already in an account at CONNECT time", c.opts.Username)
+				} else {
+					s.Warnf("User supposedly pre-authenticated and already in an account at CONNECT time BUT no username??")
+				}
+				s.mu.Unlock()
+				return true
+			} else {
+				if c.opts.Username != _EMPTY_ {
+					user, ok = s.users[c.opts.Username]
+					if !ok || !c.connectionTypeAllowed(user.AllowedConnectionTypes) {
+						s.mu.Unlock()
+						return false
+					}
 				}
 			}
 		}
