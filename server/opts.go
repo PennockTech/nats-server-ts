@@ -3186,10 +3186,11 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 				uorn[u.Username] = entry
 				u.Account = acc
 			}
-			if err := uorn.auditDupDefaults(); err != nil {
-				*errors = append(*errors, err)
-			}
 			opts.Users = append(opts.Users, users...)
+		}
+		// We only need to audit at the end of parsing all the users
+		if err := uorn.auditDupDefaults(); err != nil {
+			*errors = append(*errors, err)
 		}
 	}
 	lt = tk
