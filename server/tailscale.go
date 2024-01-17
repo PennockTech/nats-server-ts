@@ -142,6 +142,24 @@ func (s *Server) startTailscaleServer() {
 	}
 
 	ts := sopts.newTsNetServer()
+
+	status, err := ts.Up(context.TODO())
+	if err != nil {
+		ts.Close()
+		s.Fatalf("Unable to bring up Tailscale link: %w", err)
+	}
+	s.Noticef("tailscale up: version=%q backend-state=%q available-tls-cert-domains=%v", status.Version, status.BackendState, status.CertDomains)
+	if len(status.Health) > 0 {
+		for i := range status.Health {
+			s.Warnf("tailscale health problem: %q", status.Health[i])
+		}
+	}
+	if status.CurrentTailnet == nil {
+		s.Warnf("tailscale tailnet: IS NOT CONNECTED")
+	} else {
+		s.Noticef("tailscale tailnet: name=%q dns-suffix=%q magic-dns=%v", status.CurrentTailnet.Name, status.CurrentTailnet.MagicDNSSuffix, status.CurrentTailnet.MagicDNSEnabled)
+	}
+
 	ln, err := ts.Listen("tcp", sopts.tailscaleNATSPortSpec())
 	if err != nil {
 		ts.Close()
