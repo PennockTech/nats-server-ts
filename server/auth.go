@@ -891,7 +891,11 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) (au
 					}
 				}
 				// Unauthorized
-				s.Warnf("User %q pre-authenticated but requested authorization identifier they are not granted: %q", logId, requestedId)
+				if _, ok := s.accounts.Load(requestedId); ok {
+					s.Warnf("User %q pre-authenticated but requested authorization identifier they are not granted: %q", logId, requestedId)
+				} else {
+					s.Noticef("User %q pre-authenticated but requested authorization identifier for non-existent account: %q", logId, requestedId)
+				}
 				s.mu.Unlock()
 				return false
 			}
