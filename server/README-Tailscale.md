@@ -83,3 +83,64 @@ accounts: {
   }
 }
 ```
+
+In conjunction with multi-account users and JetStream, we might get a
+configuration like:
+
+```
+store_dir: "/tmp/nats-state"
+http_port: 8222
+
+tailscale {
+  name: "foo-nats"
+  quiet_logs: true
+  map_users: true
+}
+
+jetstream {
+  domain: "tailscale-foo-nats"
+  max_memory_store: 32MiB
+  max_file_store: 2GiB
+}
+
+accounts: {
+  System: {
+    users: [
+      {user: "wilma@example.org"}
+    ]
+  }
+  Commons: {
+    users: [
+      {user: "wilma@example.org", default: true}
+      {user: "fred@example.org", default: true}
+      {user: "betty@example.org", default: true}
+      {user: "barney@example.org", default: true}
+    ]
+  }
+  OurHome: {
+    jetstream: true
+    users: [
+      {user: "wilma@example.org"}
+      {user: "fred@example.org"}
+    }
+  }
+  Neighbours: {
+    users: [
+      {user: "betty@example.org"}
+      {user: "barney@example.org"}
+    ]
+  }
+}
+
+system_account: System
+```
+
+and then Wilma might run:
+
+```sh
+nats --no-context -s nats://foo-nats account info
+nats --no-context -s nats://System@foo-nats server info
+```
+
+and either Fred or Wilma could say to connect to OurHome@foo-nats to have
+access to JetStream storage.
