@@ -1,8 +1,10 @@
 Tailscale
 =========
 
-This adds a lot of Go dependencies, so will never be in core NATS.
+This adds a lot of Go dependencies, so in its current state will not reach the
+core nats-server repo.
 It's a fun experiment, that's why I did it.
+If we can tackle the dependency chain size, we can revisit that.
 
 You MUST already have a tailscale daemon running on the machine, and Tailscale
 must be up (ie, connected to your tailnet).
